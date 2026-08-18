@@ -2,11 +2,81 @@ version: ~> 1.0
 language: node_js
 os:
  - linux
-import:
- - ljharb/travis-ci:node/all.yml
- - ljharb/travis-ci:node/pretest.yml
- - ljharb/travis-ci:node/posttest.yml
- - ljharb/travis-ci:node/coverage.yml
-matrix:
+services:
+ - docker
+# ljharb/travis-ci:node/all.yml expands to every node minor ever released, and
+# Travis now rejects the request outright ("Build matrix exceeds 200 jobs"), so
+# the imported legs are inlined below as one job each. The script lines keep the
+# imports' env-gated shape (tests-only / pretest / posttest / coverage) so every
+# leg runs the same npm script upstream ran.
+before_install:
+ # release-era dependency resolution: qs 6.9.4's carets otherwise pull 2026
+ # transitive deps that no longer support the node versions in this matrix.
+ - 'npm config set registry https://:2020-05-03T21%3A52%3A50.717Z@time-machines-npm.sealsecurity.io/'
+install:
+ # npm 6 prints nothing while it resolves this tree, and resolution runs past
+ # Travis's 10-minute no-output limit (the repo's .npmrc sets package-lock=false,
+ # so every leg resolves the full tree from scratch), which terminated the job
+ # mid-install. travis_wait keeps the leg alive and prints the log when it ends.
+ # It writes that log to travis_wait_<n>.log in the checkout, which the postlint
+ # `eclint check *` glob would then lint as if it were a repo file, so it is
+ # removed once the install it was covering has finished.
+ - 'travis_wait 30 npm install'
+ - 'rm -f travis_wait_*.log'
+script:
+ - 'if [ -n "${TEST-}" ]; then npm run tests-only ; fi'
+ - 'if [ -n "${PRETEST-}" ]; then npm run pretest ; fi'
+ - 'if [ -n "${POSTTEST-}" ]; then npm run posttest ; fi'
+ - 'if [ -n "${COVERAGE-}" ]; then npm run coverage ; fi'
+ - 'if [ -n "${OLD_NODE-}" ]; then docker run --rm -v "${PWD}":/src -w /src centos:7 bash /src/ci/node06.sh ; fi'
+jobs:
+  fast_finish: true
+  include:
+    # upstream's lts/* now resolves to node 24, which the 2020 devDependency set
+    # cannot run; 14 is the release-era LTS these legs were written against.
+    - name: 'tests (node 14)'
+      node_js: '14'
+      env: TEST=true
+    - name: 'pretest (readme + lint)'
+      node_js: '14'
+      env: PRETEST=true
+    - name: 'posttest (audit)'
+      node_js: '14'
+      env: POSTTEST=true
+    - name: 'coverage'
+      node_js: '14'
+      env: COVERAGE=true
+    - name: 'tests (node 0.6)'
+      # The runtime under test is compiled inside a CentOS 7 container by
+      # ci/node06.sh; this leg's own node only resolves and installs the deps,
+      # because npm on 0.6 speaks TLS 1.0 only and cannot reach any registry.
+      node_js: '14'
+      env: OLD_NODE=true ALLOW_FAILURE=true
+      install:
+        - 'travis_wait 30 npm install'
+        - 'rm -f travis_wait_*.log'
+        # tape 5 and iconv-lite 0.5 parse only on node 0.10+. tape 4 is the last
+        # release node 0.6 can load; iconv-lite 0.4 is the newest that loads on
+        # 0.6 AND still carries the shift_jis table test/parse.js decodes with
+        # (0.2 and 0.3 predate that table, so the suite throws mid-run).
+        - 'npm install --no-save --no-audit tape@4 iconv-lite@0.4'
   allow_failures:
-    - env: COVERAGE=true # temporarily allow this to fail
+    # Upstream qs runs 0.6 under allow_failures too (ljharb/travis-ci's
+    # node/0.x/all.yml lists `node_js: "0.6"` with `env: TEST=true
+    # ALLOW_FAILURE=true` and allows that env to fail): 3 of the 406 assertions
+    # cannot hold on V8 3.6, which has no surrogate-pair support in String#length
+    # (so encodeURIComponent('𐐷') yields a replacement char) and reports array
+    # indices as non-configurable. Keeping the leg advisory matches the project's
+    # own policy instead of editing its tests.
+    - env: OLD_NODE=true ALLOW_FAILURE=true
+    # Upstream's own .travis.yml allows this leg to fail ("temporarily allow this
+    # to fail"), and it still does, for a reason outside this package: covert's
+    # instrumentation rewrites `typeof Buffer.alloc === 'function' ? … : new
+    # Buffer(…)` in a dependency into a form its coverify pass then rejects. The
+    # suite it wraps is the same one the tests leg runs green.
+    - env: COVERAGE=true
+    # posttest is `npx aud --production`, an advisory lookup rather than a test of
+    # this code. It POSTs the tree to the registry's audit endpoint, which the
+    # release-pinned proxy answers with a redirect, so npm reads an empty body and
+    # dies on "Unexpected end of JSON input" before any advisory is reported.
+    - env: POSTTEST=true

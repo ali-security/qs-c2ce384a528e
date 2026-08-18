@@ -1,0 +1,29 @@
+name: 'Seal Build'
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pack:
+    name: 'Pack tarball'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '14.1.0'
+
+    - name: 'npm version'
+      run: npm --version
+
+    - name: 'npm pack'
+      run: npm pack --ignore-scripts
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: npm-tarball
+        path: qs-*.tgz
+        if-no-files-found: error
